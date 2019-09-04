@@ -17,7 +17,7 @@
         }
       };          
 
-      fetch('https://github.com/FiveTechSoft/harbour_and_xharbour_builds/blob/master/emscripten/hbtest.wasm').then(response =>
+      fetch('hbtest.wasm').then(response =>
         response.arrayBuffer()
       ).then(bytes =>
         WebAssembly.instantiate(bytes, importObject)
