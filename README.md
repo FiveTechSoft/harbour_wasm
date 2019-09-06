@@ -26,7 +26,8 @@ make
 
 go.sh
 ```
-../bin/darwin/clang/hbmk2 hello -comp=wasm -plat=abstr -gtcgi -ldflag="-g4 -Os -s EXIT_RUNTIME=1" -info -trace
-cp hello.js /Users/$USER/mod_harbour/samples/wasm/hello.js
-cp hello.wasm /Users/$USER/mod_harbour/samples/wasm/hello.wasm
+../bin/darwin/clang/hbmk2 $1 -comp=wasm -plat=abstr -gtcgi -ldflag="-g4 -Os -s EXIT_RUNTIME=1" -o$1.html -info -trace
+cp $1.html /Users/$USER/mod_harbour/samples/wasm/$1.html
+cp $1.js /Users/$USER/mod_harbour/samples/wasm/$1.js
+cp $1.wasm /Users/$USER/mod_harbour/samples/wasm/$1.wasm
 ```
