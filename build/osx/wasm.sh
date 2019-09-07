@@ -1,5 +1,5 @@
 sh ../emsdk/emsdk_env.sh
-export PATH=$PATH:../emsdk/fastcomp/emscripten
+export PATH=$PATH:/Users/$USER/emsdk/fastcomp/emscripten
 export LLVM_ROOT=/Users/$USER/emsdk/fastcomp/bin
 export HB_COMPILER=wasm
 export HB_PLATFORM=abstr
