@@ -35,7 +35,7 @@ for (key in Module) {
   }
 }
 
-var arguments_ = [editor.getValue()];
+var arguments_ = [ editor.getValue() ];
 var thisProgram = './this.program';
 var quit_ = function(status, toThrow) {
   throw toThrow;
@@ -1220,11 +1220,11 @@ function updateGlobalBufferAndViews(buf) {
 
 
 var STATIC_BASE = 1024,
-    STACK_BASE = 320224,
+    STACK_BASE = 860288,
     STACKTOP = STACK_BASE,
-    STACK_MAX = 5563104,
-    DYNAMIC_BASE = 5563104,
-    DYNAMICTOP_PTR = 320192;
+    STACK_MAX = 6103168,
+    DYNAMIC_BASE = 6103168,
+    DYNAMICTOP_PTR = 860256;
 
 assert(STACK_BASE % 16 === 0, 'stack must start aligned');
 assert(DYNAMIC_BASE % 16 === 0, 'heap must start aligned');
@@ -1358,6 +1358,7 @@ function initRuntime() {
   runtimeInitialized = true;
   if (!Module["noFSInit"] && !FS.init.initialized) FS.init();
 TTY.init();
+SOCKFS.root = FS.mount(SOCKFS, {}, null);
 PIPEFS.root = FS.mount(PIPEFS, {}, null);
   callRuntimeCallbacks(__ATINIT__);
 }
@@ -1714,8 +1715,8 @@ Module['asm'] = function(global, env, providedBuffer) {
   ;
   // import table
   env['table'] = wasmTable = new WebAssembly.Table({
-    'initial': 38400,
-    'maximum': 38400,
+    'initial': 116850,
+    'maximum': 116850,
     'element': 'anyfunc'
   });
   // With the wasm backend __memory_base and __table_base and only needed for
@@ -1741,7 +1742,7 @@ var ASM_CONSTS = [];
 
 
 
-// STATICTOP = STATIC_BASE + 319200;
+// STATICTOP = STATIC_BASE + 859264;
 /* global initializers */  __ATINIT__.push({ func: function() { globalCtors() } });
 
 
@@ -1752,7 +1753,7 @@ var ASM_CONSTS = [];
 
 
 /* no memory initializer */
-var tempDoublePtr = 320208
+var tempDoublePtr = 860272
 assert(tempDoublePtr % 8 == 0);
 
 function copyTempFloat(ptr) { // functions, because inlining this code increases code size too much
@@ -5014,6 +5015,1076 @@ function copyTempDouble(ptr) {
   }
   }
 
+  
+  var SOCKFS={mount:function(mount) {
+        // If Module['websocket'] has already been defined (e.g. for configuring
+        // the subprotocol/url) use that, if not initialise it to a new object.
+        Module['websocket'] = (Module['websocket'] && 
+                               ('object' === typeof Module['websocket'])) ? Module['websocket'] : {};
+  
+        // Add the Event registration mechanism to the exported websocket configuration
+        // object so we can register network callbacks from native JavaScript too.
+        // For more documentation see system/include/emscripten/emscripten.h
+        Module['websocket']._callbacks = {};
+        Module['websocket']['on'] = function(event, callback) {
+  	    if ('function' === typeof callback) {
+  		  this._callbacks[event] = callback;
+          }
+  	    return this;
+        };
+  
+        Module['websocket'].emit = function(event, param) {
+  	    if ('function' === typeof this._callbacks[event]) {
+  		  this._callbacks[event].call(this, param);
+          }
+        };
+  
+        // If debug is enabled register simple default logging callbacks for each Event.
+  
+        return FS.createNode(null, '/', 16384 | 511 /* 0777 */, 0);
+      },createSocket:function(family, type, protocol) {
+        var streaming = type == 1;
+        if (protocol) {
+          assert(streaming == (protocol == 6)); // if SOCK_STREAM, must be tcp
+        }
+  
+        // create our internal socket structure
+        var sock = {
+          family: family,
+          type: type,
+          protocol: protocol,
+          server: null,
+          error: null, // Used in getsockopt for SOL_SOCKET/SO_ERROR test
+          peers: {},
+          pending: [],
+          recv_queue: [],
+          sock_ops: SOCKFS.websocket_sock_ops
+        };
+  
+        // create the filesystem node to store the socket structure
+        var name = SOCKFS.nextname();
+        var node = FS.createNode(SOCKFS.root, name, 49152, 0);
+        node.sock = sock;
+  
+        // and the wrapping stream that enables library functions such
+        // as read and write to indirectly interact with the socket
+        var stream = FS.createStream({
+          path: name,
+          node: node,
+          flags: FS.modeStringToFlags('r+'),
+          seekable: false,
+          stream_ops: SOCKFS.stream_ops
+        });
+  
+        // map the new stream to the socket structure (sockets have a 1:1
+        // relationship with a stream)
+        sock.stream = stream;
+  
+        return sock;
+      },getSocket:function(fd) {
+        var stream = FS.getStream(fd);
+        if (!stream || !FS.isSocket(stream.node.mode)) {
+          return null;
+        }
+        return stream.node.sock;
+      },stream_ops:{poll:function(stream) {
+          var sock = stream.node.sock;
+          return sock.sock_ops.poll(sock);
+        },ioctl:function(stream, request, varargs) {
+          var sock = stream.node.sock;
+          return sock.sock_ops.ioctl(sock, request, varargs);
+        },read:function(stream, buffer, offset, length, position /* ignored */) {
+          var sock = stream.node.sock;
+          var msg = sock.sock_ops.recvmsg(sock, length);
+          if (!msg) {
+            // socket is closed
+            return 0;
+          }
+          buffer.set(msg.buffer, offset);
+          return msg.buffer.length;
+        },write:function(stream, buffer, offset, length, position /* ignored */) {
+          var sock = stream.node.sock;
+          return sock.sock_ops.sendmsg(sock, buffer, offset, length);
+        },close:function(stream) {
+          var sock = stream.node.sock;
+          sock.sock_ops.close(sock);
+        }},nextname:function() {
+        if (!SOCKFS.nextname.current) {
+          SOCKFS.nextname.current = 0;
+        }
+        return 'socket[' + (SOCKFS.nextname.current++) + ']';
+      },websocket_sock_ops:{createPeer:function(sock, addr, port) {
+          var ws;
+  
+          if (typeof addr === 'object') {
+            ws = addr;
+            addr = null;
+            port = null;
+          }
+  
+          if (ws) {
+            // for sockets that've already connected (e.g. we're the server)
+            // we can inspect the _socket property for the address
+            if (ws._socket) {
+              addr = ws._socket.remoteAddress;
+              port = ws._socket.remotePort;
+            }
+            // if we're just now initializing a connection to the remote,
+            // inspect the url property
+            else {
+              var result = /ws[s]?:\/\/([^:]+):(\d+)/.exec(ws.url);
+              if (!result) {
+                throw new Error('WebSocket URL must be in the format ws(s)://address:port');
+              }
+              addr = result[1];
+              port = parseInt(result[2], 10);
+            }
+          } else {
+            // create the actual websocket object and connect
+            try {
+              // runtimeConfig gets set to true if WebSocket runtime configuration is available.
+              var runtimeConfig = (Module['websocket'] && ('object' === typeof Module['websocket']));
+  
+              // The default value is 'ws://' the replace is needed because the compiler replaces '//' comments with '#'
+              // comments without checking context, so we'd end up with ws:#, the replace swaps the '#' for '//' again.
+              var url = 'ws:#'.replace('#', '//');
+  
+              if (runtimeConfig) {
+                if ('string' === typeof Module['websocket']['url']) {
+                  url = Module['websocket']['url']; // Fetch runtime WebSocket URL config.
+                }
+              }
+  
+              if (url === 'ws://' || url === 'wss://') { // Is the supplied URL config just a prefix, if so complete it.
+                var parts = addr.split('/');
+                url = url + parts[0] + ":" + port + "/" + parts.slice(1).join('/');
+              }
+  
+              // Make the WebSocket subprotocol (Sec-WebSocket-Protocol) default to binary if no configuration is set.
+              var subProtocols = 'binary'; // The default value is 'binary'
+  
+              if (runtimeConfig) {
+                if ('string' === typeof Module['websocket']['subprotocol']) {
+                  subProtocols = Module['websocket']['subprotocol']; // Fetch runtime WebSocket subprotocol config.
+                }
+              }
+  
+              // The default WebSocket options
+              var opts = undefined;
+  
+              if (subProtocols !== 'null') {
+                // The regex trims the string (removes spaces at the beginning and end, then splits the string by
+                // <any space>,<any space> into an Array. Whitespace removal is important for Websockify and ws.
+                subProtocols = subProtocols.replace(/^ +| +$/g,"").split(/ *, */);
+  
+                // The node ws library API for specifying optional subprotocol is slightly different than the browser's.
+                opts = ENVIRONMENT_IS_NODE ? {'protocol': subProtocols.toString()} : subProtocols;
+              }
+  
+              // some webservers (azure) does not support subprotocol header
+              if (runtimeConfig && null === Module['websocket']['subprotocol']) {
+                subProtocols = 'null';
+                opts = undefined;
+              }
+  
+              // If node we use the ws library.
+              var WebSocketConstructor;
+              if (ENVIRONMENT_IS_NODE) {
+                WebSocketConstructor = require('ws');
+              } else
+              if (ENVIRONMENT_IS_WEB) {
+                WebSocketConstructor = window['WebSocket'];
+              } else
+              {
+                WebSocketConstructor = WebSocket;
+              }
+              ws = new WebSocketConstructor(url, opts);
+              ws.binaryType = 'arraybuffer';
+            } catch (e) {
+              throw new FS.ErrnoError(ERRNO_CODES.EHOSTUNREACH);
+            }
+          }
+  
+  
+          var peer = {
+            addr: addr,
+            port: port,
+            socket: ws,
+            dgram_send_queue: []
+          };
+  
+          SOCKFS.websocket_sock_ops.addPeer(sock, peer);
+          SOCKFS.websocket_sock_ops.handlePeerEvents(sock, peer);
+  
+          // if this is a bound dgram socket, send the port number first to allow
+          // us to override the ephemeral port reported to us by remotePort on the
+          // remote end.
+          if (sock.type === 2 && typeof sock.sport !== 'undefined') {
+            peer.dgram_send_queue.push(new Uint8Array([
+                255, 255, 255, 255,
+                'p'.charCodeAt(0), 'o'.charCodeAt(0), 'r'.charCodeAt(0), 't'.charCodeAt(0),
+                ((sock.sport & 0xff00) >> 8) , (sock.sport & 0xff)
+            ]));
+          }
+  
+          return peer;
+        },getPeer:function(sock, addr, port) {
+          return sock.peers[addr + ':' + port];
+        },addPeer:function(sock, peer) {
+          sock.peers[peer.addr + ':' + peer.port] = peer;
+        },removePeer:function(sock, peer) {
+          delete sock.peers[peer.addr + ':' + peer.port];
+        },handlePeerEvents:function(sock, peer) {
+          var first = true;
+  
+          var handleOpen = function () {
+  
+            Module['websocket'].emit('open', sock.stream.fd);
+  
+            try {
+              var queued = peer.dgram_send_queue.shift();
+              while (queued) {
+                peer.socket.send(queued);
+                queued = peer.dgram_send_queue.shift();
+              }
+            } catch (e) {
+              // not much we can do here in the way of proper error handling as we've already
+              // lied and said this data was sent. shut it down.
+              peer.socket.close();
+            }
+          };
+  
+          function handleMessage(data) {
+            if (typeof data === 'string') {
+              var encoder = new TextEncoder(); // should be utf-8
+              data = encoder.encode(data); // make a typed array from the string
+            } else {
+              assert(data.byteLength !== undefined); // must receive an ArrayBuffer
+              if (data.byteLength == 0) {
+                // An empty ArrayBuffer will emit a pseudo disconnect event
+                // as recv/recvmsg will return zero which indicates that a socket
+                // has performed a shutdown although the connection has not been disconnected yet.
+                return;
+              } else {
+                data = new Uint8Array(data); // make a typed array view on the array buffer
+              }
+            }
+  
+  
+            // if this is the port message, override the peer's port with it
+            var wasfirst = first;
+            first = false;
+            if (wasfirst &&
+                data.length === 10 &&
+                data[0] === 255 && data[1] === 255 && data[2] === 255 && data[3] === 255 &&
+                data[4] === 'p'.charCodeAt(0) && data[5] === 'o'.charCodeAt(0) && data[6] === 'r'.charCodeAt(0) && data[7] === 't'.charCodeAt(0)) {
+              // update the peer's port and it's key in the peer map
+              var newport = ((data[8] << 8) | data[9]);
+              SOCKFS.websocket_sock_ops.removePeer(sock, peer);
+              peer.port = newport;
+              SOCKFS.websocket_sock_ops.addPeer(sock, peer);
+              return;
+            }
+  
+            sock.recv_queue.push({ addr: peer.addr, port: peer.port, data: data });
+            Module['websocket'].emit('message', sock.stream.fd);
+          };
+  
+          if (ENVIRONMENT_IS_NODE) {
+            peer.socket.on('open', handleOpen);
+            peer.socket.on('message', function(data, flags) {
+              if (!flags.binary) {
+                return;
+              }
+              handleMessage((new Uint8Array(data)).buffer);  // copy from node Buffer -> ArrayBuffer
+            });
+            peer.socket.on('close', function() {
+              Module['websocket'].emit('close', sock.stream.fd);
+            });
+            peer.socket.on('error', function(error) {
+              // Although the ws library may pass errors that may be more descriptive than
+              // ECONNREFUSED they are not necessarily the expected error code e.g. 
+              // ENOTFOUND on getaddrinfo seems to be node.js specific, so using ECONNREFUSED
+              // is still probably the most useful thing to do.
+              sock.error = ERRNO_CODES.ECONNREFUSED; // Used in getsockopt for SOL_SOCKET/SO_ERROR test.
+              Module['websocket'].emit('error', [sock.stream.fd, sock.error, 'ECONNREFUSED: Connection refused']);
+              // don't throw
+            });
+          } else {
+            peer.socket.onopen = handleOpen;
+            peer.socket.onclose = function() {
+              Module['websocket'].emit('close', sock.stream.fd);
+            };
+            peer.socket.onmessage = function peer_socket_onmessage(event) {
+              handleMessage(event.data);
+            };
+            peer.socket.onerror = function(error) {
+              // The WebSocket spec only allows a 'simple event' to be thrown on error,
+              // so we only really know as much as ECONNREFUSED.
+              sock.error = ERRNO_CODES.ECONNREFUSED; // Used in getsockopt for SOL_SOCKET/SO_ERROR test.
+              Module['websocket'].emit('error', [sock.stream.fd, sock.error, 'ECONNREFUSED: Connection refused']);
+            };
+          }
+        },poll:function(sock) {
+          if (sock.type === 1 && sock.server) {
+            // listen sockets should only say they're available for reading
+            // if there are pending clients.
+            return sock.pending.length ? (64 | 1) : 0;
+          }
+  
+          var mask = 0;
+          var dest = sock.type === 1 ?  // we only care about the socket state for connection-based sockets
+            SOCKFS.websocket_sock_ops.getPeer(sock, sock.daddr, sock.dport) :
+            null;
+  
+          if (sock.recv_queue.length ||
+              !dest ||  // connection-less sockets are always ready to read
+              (dest && dest.socket.readyState === dest.socket.CLOSING) ||
+              (dest && dest.socket.readyState === dest.socket.CLOSED)) {  // let recv return 0 once closed
+            mask |= (64 | 1);
+          }
+  
+          if (!dest ||  // connection-less sockets are always ready to write
+              (dest && dest.socket.readyState === dest.socket.OPEN)) {
+            mask |= 4;
+          }
+  
+          if ((dest && dest.socket.readyState === dest.socket.CLOSING) ||
+              (dest && dest.socket.readyState === dest.socket.CLOSED)) {
+            mask |= 16;
+          }
+  
+          return mask;
+        },ioctl:function(sock, request, arg) {
+          switch (request) {
+            case 21531:
+              var bytes = 0;
+              if (sock.recv_queue.length) {
+                bytes = sock.recv_queue[0].data.length;
+              }
+              HEAP32[((arg)>>2)]=bytes;
+              return 0;
+            default:
+              return ERRNO_CODES.EINVAL;
+          }
+        },close:function(sock) {
+          // if we've spawned a listen server, close it
+          if (sock.server) {
+            try {
+              sock.server.close();
+            } catch (e) {
+            }
+            sock.server = null;
+          }
+          // close any peer connections
+          var peers = Object.keys(sock.peers);
+          for (var i = 0; i < peers.length; i++) {
+            var peer = sock.peers[peers[i]];
+            try {
+              peer.socket.close();
+            } catch (e) {
+            }
+            SOCKFS.websocket_sock_ops.removePeer(sock, peer);
+          }
+          return 0;
+        },bind:function(sock, addr, port) {
+          if (typeof sock.saddr !== 'undefined' || typeof sock.sport !== 'undefined') {
+            throw new FS.ErrnoError(ERRNO_CODES.EINVAL);  // already bound
+          }
+          sock.saddr = addr;
+          sock.sport = port;
+          // in order to emulate dgram sockets, we need to launch a listen server when
+          // binding on a connection-less socket
+          // note: this is only required on the server side
+          if (sock.type === 2) {
+            // close the existing server if it exists
+            if (sock.server) {
+              sock.server.close();
+              sock.server = null;
+            }
+            // swallow error operation not supported error that occurs when binding in the
+            // browser where this isn't supported
+            try {
+              sock.sock_ops.listen(sock, 0);
+            } catch (e) {
+              if (!(e instanceof FS.ErrnoError)) throw e;
+              if (e.errno !== ERRNO_CODES.EOPNOTSUPP) throw e;
+            }
+          }
+        },connect:function(sock, addr, port) {
+          if (sock.server) {
+            throw new FS.ErrnoError(ERRNO_CODES.EOPNOTSUPP);
+          }
+  
+          // TODO autobind
+          // if (!sock.addr && sock.type == 2) {
+          // }
+  
+          // early out if we're already connected / in the middle of connecting
+          if (typeof sock.daddr !== 'undefined' && typeof sock.dport !== 'undefined') {
+            var dest = SOCKFS.websocket_sock_ops.getPeer(sock, sock.daddr, sock.dport);
+            if (dest) {
+              if (dest.socket.readyState === dest.socket.CONNECTING) {
+                throw new FS.ErrnoError(ERRNO_CODES.EALREADY);
+              } else {
+                throw new FS.ErrnoError(ERRNO_CODES.EISCONN);
+              }
+            }
+          }
+  
+          // add the socket to our peer list and set our
+          // destination address / port to match
+          var peer = SOCKFS.websocket_sock_ops.createPeer(sock, addr, port);
+          sock.daddr = peer.addr;
+          sock.dport = peer.port;
+  
+          // always "fail" in non-blocking mode
+          throw new FS.ErrnoError(ERRNO_CODES.EINPROGRESS);
+        },listen:function(sock, backlog) {
+          if (!ENVIRONMENT_IS_NODE) {
+            throw new FS.ErrnoError(ERRNO_CODES.EOPNOTSUPP);
+          }
+          if (sock.server) {
+             throw new FS.ErrnoError(ERRNO_CODES.EINVAL);  // already listening
+          }
+          var WebSocketServer = require('ws').Server;
+          var host = sock.saddr;
+          sock.server = new WebSocketServer({
+            host: host,
+            port: sock.sport
+            // TODO support backlog
+          });
+          Module['websocket'].emit('listen', sock.stream.fd); // Send Event with listen fd.
+  
+          sock.server.on('connection', function(ws) {
+            if (sock.type === 1) {
+              var newsock = SOCKFS.createSocket(sock.family, sock.type, sock.protocol);
+  
+              // create a peer on the new socket
+              var peer = SOCKFS.websocket_sock_ops.createPeer(newsock, ws);
+              newsock.daddr = peer.addr;
+              newsock.dport = peer.port;
+  
+              // push to queue for accept to pick up
+              sock.pending.push(newsock);
+              Module['websocket'].emit('connection', newsock.stream.fd);
+            } else {
+              // create a peer on the listen socket so calling sendto
+              // with the listen socket and an address will resolve
+              // to the correct client
+              SOCKFS.websocket_sock_ops.createPeer(sock, ws);
+              Module['websocket'].emit('connection', sock.stream.fd);
+            }
+          });
+          sock.server.on('closed', function() {
+            Module['websocket'].emit('close', sock.stream.fd);
+            sock.server = null;
+          });
+          sock.server.on('error', function(error) {
+            // Although the ws library may pass errors that may be more descriptive than
+            // ECONNREFUSED they are not necessarily the expected error code e.g. 
+            // ENOTFOUND on getaddrinfo seems to be node.js specific, so using EHOSTUNREACH
+            // is still probably the most useful thing to do. This error shouldn't
+            // occur in a well written app as errors should get trapped in the compiled
+            // app's own getaddrinfo call.
+            sock.error = ERRNO_CODES.EHOSTUNREACH; // Used in getsockopt for SOL_SOCKET/SO_ERROR test.
+            Module['websocket'].emit('error', [sock.stream.fd, sock.error, 'EHOSTUNREACH: Host is unreachable']);
+            // don't throw
+          });
+        },accept:function(listensock) {
+          if (!listensock.server) {
+            throw new FS.ErrnoError(ERRNO_CODES.EINVAL);
+          }
+          var newsock = listensock.pending.shift();
+          newsock.stream.flags = listensock.stream.flags;
+          return newsock;
+        },getname:function(sock, peer) {
+          var addr, port;
+          if (peer) {
+            if (sock.daddr === undefined || sock.dport === undefined) {
+              throw new FS.ErrnoError(ERRNO_CODES.ENOTCONN);
+            }
+            addr = sock.daddr;
+            port = sock.dport;
+          } else {
+            // TODO saddr and sport will be set for bind()'d UDP sockets, but what
+            // should we be returning for TCP sockets that've been connect()'d?
+            addr = sock.saddr || 0;
+            port = sock.sport || 0;
+          }
+          return { addr: addr, port: port };
+        },sendmsg:function(sock, buffer, offset, length, addr, port) {
+          if (sock.type === 2) {
+            // connection-less sockets will honor the message address,
+            // and otherwise fall back to the bound destination address
+            if (addr === undefined || port === undefined) {
+              addr = sock.daddr;
+              port = sock.dport;
+            }
+            // if there was no address to fall back to, error out
+            if (addr === undefined || port === undefined) {
+              throw new FS.ErrnoError(ERRNO_CODES.EDESTADDRREQ);
+            }
+          } else {
+            // connection-based sockets will only use the bound
+            addr = sock.daddr;
+            port = sock.dport;
+          }
+  
+          // find the peer for the destination address
+          var dest = SOCKFS.websocket_sock_ops.getPeer(sock, addr, port);
+  
+          // early out if not connected with a connection-based socket
+          if (sock.type === 1) {
+            if (!dest || dest.socket.readyState === dest.socket.CLOSING || dest.socket.readyState === dest.socket.CLOSED) {
+              throw new FS.ErrnoError(ERRNO_CODES.ENOTCONN);
+            } else if (dest.socket.readyState === dest.socket.CONNECTING) {
+              throw new FS.ErrnoError(ERRNO_CODES.EAGAIN);
+            }
+          }
+  
+          // create a copy of the incoming data to send, as the WebSocket API
+          // doesn't work entirely with an ArrayBufferView, it'll just send
+          // the entire underlying buffer
+          if (ArrayBuffer.isView(buffer)) {
+            offset += buffer.byteOffset;
+            buffer = buffer.buffer;
+          }
+  
+          var data;
+            data = buffer.slice(offset, offset + length);
+  
+          // if we're emulating a connection-less dgram socket and don't have
+          // a cached connection, queue the buffer to send upon connect and
+          // lie, saying the data was sent now.
+          if (sock.type === 2) {
+            if (!dest || dest.socket.readyState !== dest.socket.OPEN) {
+              // if we're not connected, open a new connection
+              if (!dest || dest.socket.readyState === dest.socket.CLOSING || dest.socket.readyState === dest.socket.CLOSED) {
+                dest = SOCKFS.websocket_sock_ops.createPeer(sock, addr, port);
+              }
+              dest.dgram_send_queue.push(data);
+              return length;
+            }
+          }
+  
+          try {
+            // send the actual data
+            dest.socket.send(data);
+            return length;
+          } catch (e) {
+            throw new FS.ErrnoError(ERRNO_CODES.EINVAL);
+          }
+        },recvmsg:function(sock, length) {
+          // http://pubs.opengroup.org/onlinepubs/7908799/xns/recvmsg.html
+          if (sock.type === 1 && sock.server) {
+            // tcp servers should not be recv()'ing on the listen socket
+            throw new FS.ErrnoError(ERRNO_CODES.ENOTCONN);
+          }
+  
+          var queued = sock.recv_queue.shift();
+          if (!queued) {
+            if (sock.type === 1) {
+              var dest = SOCKFS.websocket_sock_ops.getPeer(sock, sock.daddr, sock.dport);
+  
+              if (!dest) {
+                // if we have a destination address but are not connected, error out
+                throw new FS.ErrnoError(ERRNO_CODES.ENOTCONN);
+              }
+              else if (dest.socket.readyState === dest.socket.CLOSING || dest.socket.readyState === dest.socket.CLOSED) {
+                // return null if the socket has closed
+                return null;
+              }
+              else {
+                // else, our socket is in a valid state but truly has nothing available
+                throw new FS.ErrnoError(ERRNO_CODES.EAGAIN);
+              }
+            } else {
+              throw new FS.ErrnoError(ERRNO_CODES.EAGAIN);
+            }
+          }
+  
+          // queued.data will be an ArrayBuffer if it's unadulterated, but if it's
+          // requeued TCP data it'll be an ArrayBufferView
+          var queuedLength = queued.data.byteLength || queued.data.length;
+          var queuedOffset = queued.data.byteOffset || 0;
+          var queuedBuffer = queued.data.buffer || queued.data;
+          var bytesRead = Math.min(length, queuedLength);
+          var res = {
+            buffer: new Uint8Array(queuedBuffer, queuedOffset, bytesRead),
+            addr: queued.addr,
+            port: queued.port
+          };
+  
+  
+          // push back any unread data for TCP connections
+          if (sock.type === 1 && bytesRead < queuedLength) {
+            var bytesRemaining = queuedLength - bytesRead;
+            queued.data = new Uint8Array(queuedBuffer, queuedOffset + bytesRead, bytesRemaining);
+            sock.recv_queue.unshift(queued);
+          }
+  
+          return res;
+        }}};
+  
+  
+  function __inet_pton4_raw(str) {
+      var b = str.split('.');
+      for (var i = 0; i < 4; i++) {
+        var tmp = Number(b[i]);
+        if (isNaN(tmp)) return null;
+        b[i] = tmp;
+      }
+      return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0;
+    }
+  
+  function __inet_pton6_raw(str) {
+      var words;
+      var w, offset, z, i;
+      /* http://home.deds.nl/~aeron/regex/ */
+      var valid6regx = /^((?=.*::)(?!.*::.+::)(::)?([\dA-F]{1,4}:(:|\b)|){5}|([\dA-F]{1,4}:){6})((([\dA-F]{1,4}((?!\3)::|:\b|$))|(?!\2\3)){2}|(((2[0-4]|1\d|[1-9])?\d|25[0-5])\.?\b){4})$/i
+      var parts = [];
+      if (!valid6regx.test(str)) {
+        return null;
+      }
+      if (str === "::") {
+        return [0, 0, 0, 0, 0, 0, 0, 0];
+      }
+      // Z placeholder to keep track of zeros when splitting the string on ":"
+      if (str.indexOf("::") === 0) {
+        str = str.replace("::", "Z:"); // leading zeros case
+      } else {
+        str = str.replace("::", ":Z:");
+      }
+  
+      if (str.indexOf(".") > 0) {
+        // parse IPv4 embedded stress
+        str = str.replace(new RegExp('[.]', 'g'), ":");
+        words = str.split(":");
+        words[words.length-4] = parseInt(words[words.length-4]) + parseInt(words[words.length-3])*256;
+        words[words.length-3] = parseInt(words[words.length-2]) + parseInt(words[words.length-1])*256;
+        words = words.slice(0, words.length-2);
+      } else {
+        words = str.split(":");
+      }
+  
+      offset = 0; z = 0;
+      for (w=0; w < words.length; w++) {
+        if (typeof words[w] === 'string') {
+          if (words[w] === 'Z') {
+            // compressed zeros - write appropriate number of zero words
+            for (z = 0; z < (8 - words.length+1); z++) {
+              parts[w+z] = 0;
+            }
+            offset = z-1;
+          } else {
+            // parse hex to field to 16-bit value and write it in network byte-order
+            parts[w+offset] = _htons(parseInt(words[w],16));
+          }
+        } else {
+          // parsed IPv4 words
+          parts[w+offset] = words[w];
+        }
+      }
+      return [
+        (parts[1] << 16) | parts[0],
+        (parts[3] << 16) | parts[2],
+        (parts[5] << 16) | parts[4],
+        (parts[7] << 16) | parts[6]
+      ];
+    }var DNS={address_map:{id:1,addrs:{},names:{}},lookup_name:function (name) {
+        // If the name is already a valid ipv4 / ipv6 address, don't generate a fake one.
+        var res = __inet_pton4_raw(name);
+        if (res !== null) {
+          return name;
+        }
+        res = __inet_pton6_raw(name);
+        if (res !== null) {
+          return name;
+        }
+  
+        // See if this name is already mapped.
+        var addr;
+  
+        if (DNS.address_map.addrs[name]) {
+          addr = DNS.address_map.addrs[name];
+        } else {
+          var id = DNS.address_map.id++;
+          assert(id < 65535, 'exceeded max address mappings of 65535');
+  
+          addr = '172.29.' + (id & 0xff) + '.' + (id & 0xff00);
+  
+          DNS.address_map.names[addr] = name;
+          DNS.address_map.addrs[name] = addr;
+        }
+  
+        return addr;
+      },lookup_addr:function (addr) {
+        if (DNS.address_map.names[addr]) {
+          return DNS.address_map.names[addr];
+        }
+  
+        return null;
+      }};
+  
+  
+  var Sockets={BUFFER_SIZE:10240,MAX_BUFFER_SIZE:10485760,nextFd:1,fds:{},nextport:1,maxport:65535,peer:null,connections:{},portmap:{},localAddr:4261412874,addrPool:[33554442,50331658,67108874,83886090,100663306,117440522,134217738,150994954,167772170,184549386,201326602,218103818,234881034]};
+  
+  function __inet_ntop4_raw(addr) {
+      return (addr & 0xff) + '.' + ((addr >> 8) & 0xff) + '.' + ((addr >> 16) & 0xff) + '.' + ((addr >> 24) & 0xff)
+    }
+  
+  function __inet_ntop6_raw(ints) {
+      //  ref:  http://www.ietf.org/rfc/rfc2373.txt - section 2.5.4
+      //  Format for IPv4 compatible and mapped  128-bit IPv6 Addresses
+      //  128-bits are split into eight 16-bit words
+      //  stored in network byte order (big-endian)
+      //  |                80 bits               | 16 |      32 bits        |
+      //  +-----------------------------------------------------------------+
+      //  |               10 bytes               |  2 |      4 bytes        |
+      //  +--------------------------------------+--------------------------+
+      //  +               5 words                |  1 |      2 words        |
+      //  +--------------------------------------+--------------------------+
+      //  |0000..............................0000|0000|    IPv4 ADDRESS     | (compatible)
+      //  +--------------------------------------+----+---------------------+
+      //  |0000..............................0000|FFFF|    IPv4 ADDRESS     | (mapped)
+      //  +--------------------------------------+----+---------------------+
+      var str = "";
+      var word = 0;
+      var longest = 0;
+      var lastzero = 0;
+      var zstart = 0;
+      var len = 0;
+      var i = 0;
+      var parts = [
+        ints[0] & 0xffff,
+        (ints[0] >> 16),
+        ints[1] & 0xffff,
+        (ints[1] >> 16),
+        ints[2] & 0xffff,
+        (ints[2] >> 16),
+        ints[3] & 0xffff,
+        (ints[3] >> 16)
+      ];
+  
+      // Handle IPv4-compatible, IPv4-mapped, loopback and any/unspecified addresses
+  
+      var hasipv4 = true;
+      var v4part = "";
+      // check if the 10 high-order bytes are all zeros (first 5 words)
+      for (i = 0; i < 5; i++) {
+        if (parts[i] !== 0) { hasipv4 = false; break; }
+      }
+  
+      if (hasipv4) {
+        // low-order 32-bits store an IPv4 address (bytes 13 to 16) (last 2 words)
+        v4part = __inet_ntop4_raw(parts[6] | (parts[7] << 16));
+        // IPv4-mapped IPv6 address if 16-bit value (bytes 11 and 12) == 0xFFFF (6th word)
+        if (parts[5] === -1) {
+          str = "::ffff:";
+          str += v4part;
+          return str;
+        }
+        // IPv4-compatible IPv6 address if 16-bit value (bytes 11 and 12) == 0x0000 (6th word)
+        if (parts[5] === 0) {
+          str = "::";
+          //special case IPv6 addresses
+          if(v4part === "0.0.0.0") v4part = ""; // any/unspecified address
+          if(v4part === "0.0.0.1") v4part = "1";// loopback address
+          str += v4part;
+          return str;
+        }
+      }
+  
+      // Handle all other IPv6 addresses
+  
+      // first run to find the longest contiguous zero words
+      for (word = 0; word < 8; word++) {
+        if (parts[word] === 0) {
+          if (word - lastzero > 1) {
+            len = 0;
+          }
+          lastzero = word;
+          len++;
+        }
+        if (len > longest) {
+          longest = len;
+          zstart = word - longest + 1;
+        }
+      }
+  
+      for (word = 0; word < 8; word++) {
+        if (longest > 1) {
+          // compress contiguous zeros - to produce "::"
+          if (parts[word] === 0 && word >= zstart && word < (zstart + longest) ) {
+            if (word === zstart) {
+              str += ":";
+              if (zstart === 0) str += ":"; //leading zeros case
+            }
+            continue;
+          }
+        }
+        // converts 16-bit words from big-endian to little-endian before converting to hex string
+        str += Number(_ntohs(parts[word] & 0xffff)).toString(16);
+        str += word < 7 ? ":" : "";
+      }
+      return str;
+    }function __read_sockaddr(sa, salen) {
+      // family / port offsets are common to both sockaddr_in and sockaddr_in6
+      var family = HEAP16[((sa)>>1)];
+      var port = _ntohs(HEAPU16[(((sa)+(2))>>1)]);
+      var addr;
+  
+      switch (family) {
+        case 2:
+          if (salen !== 16) {
+            return { errno: 22 };
+          }
+          addr = HEAP32[(((sa)+(4))>>2)];
+          addr = __inet_ntop4_raw(addr);
+          break;
+        case 10:
+          if (salen !== 28) {
+            return { errno: 22 };
+          }
+          addr = [
+            HEAP32[(((sa)+(8))>>2)],
+            HEAP32[(((sa)+(12))>>2)],
+            HEAP32[(((sa)+(16))>>2)],
+            HEAP32[(((sa)+(20))>>2)]
+          ];
+          addr = __inet_ntop6_raw(addr);
+          break;
+        default:
+          return { errno: 97 };
+      }
+  
+      return { family: family, addr: addr, port: port };
+    }
+  
+  function __write_sockaddr(sa, family, addr, port) {
+      switch (family) {
+        case 2:
+          addr = __inet_pton4_raw(addr);
+          HEAP16[((sa)>>1)]=family;
+          HEAP32[(((sa)+(4))>>2)]=addr;
+          HEAP16[(((sa)+(2))>>1)]=_htons(port);
+          break;
+        case 10:
+          addr = __inet_pton6_raw(addr);
+          HEAP32[((sa)>>2)]=family;
+          HEAP32[(((sa)+(8))>>2)]=addr[0];
+          HEAP32[(((sa)+(12))>>2)]=addr[1];
+          HEAP32[(((sa)+(16))>>2)]=addr[2];
+          HEAP32[(((sa)+(20))>>2)]=addr[3];
+          HEAP16[(((sa)+(2))>>1)]=_htons(port);
+          HEAP32[(((sa)+(4))>>2)]=0;
+          HEAP32[(((sa)+(24))>>2)]=0;
+          break;
+        default:
+          return { errno: 97 };
+      }
+      // kind of lame, but let's match _read_sockaddr's interface
+      return {};
+    }function ___syscall102(which, varargs) {SYSCALLS.varargs = varargs;
+  try {
+   // socketcall
+      var call = SYSCALLS.get(), socketvararg = SYSCALLS.get();
+      // socketcalls pass the rest of the arguments in a struct
+      SYSCALLS.varargs = socketvararg;
+  
+      var getSocketFromFD = function() {
+        var socket = SOCKFS.getSocket(SYSCALLS.get());
+        if (!socket) throw new FS.ErrnoError(9);
+        return socket;
+      };
+      var getSocketAddress = function(allowNull) {
+        var addrp = SYSCALLS.get(), addrlen = SYSCALLS.get();
+        if (allowNull && addrp === 0) return null;
+        var info = __read_sockaddr(addrp, addrlen);
+        if (info.errno) throw new FS.ErrnoError(info.errno);
+        info.addr = DNS.lookup_addr(info.addr) || info.addr;
+        return info;
+      };
+  
+      switch (call) {
+        case 1: { // socket
+          var domain = SYSCALLS.get(), type = SYSCALLS.get(), protocol = SYSCALLS.get();
+          var sock = SOCKFS.createSocket(domain, type, protocol);
+          assert(sock.stream.fd < 64); // XXX ? select() assumes socket fd values are in 0..63
+          return sock.stream.fd;
+        }
+        case 2: { // bind
+          var sock = getSocketFromFD(), info = getSocketAddress();
+          sock.sock_ops.bind(sock, info.addr, info.port);
+          return 0;
+        }
+        case 3: { // connect
+          var sock = getSocketFromFD(), info = getSocketAddress();
+          sock.sock_ops.connect(sock, info.addr, info.port);
+          return 0;
+        }
+        case 4: { // listen
+          var sock = getSocketFromFD(), backlog = SYSCALLS.get();
+          sock.sock_ops.listen(sock, backlog);
+          return 0;
+        }
+        case 5: { // accept
+          var sock = getSocketFromFD(), addr = SYSCALLS.get(), addrlen = SYSCALLS.get();
+          var newsock = sock.sock_ops.accept(sock);
+          if (addr) {
+            var res = __write_sockaddr(addr, newsock.family, DNS.lookup_name(newsock.daddr), newsock.dport);
+            assert(!res.errno);
+          }
+          return newsock.stream.fd;
+        }
+        case 6: { // getsockname
+          var sock = getSocketFromFD(), addr = SYSCALLS.get(), addrlen = SYSCALLS.get();
+          // TODO: sock.saddr should never be undefined, see TODO in websocket_sock_ops.getname
+          var res = __write_sockaddr(addr, sock.family, DNS.lookup_name(sock.saddr || '0.0.0.0'), sock.sport);
+          assert(!res.errno);
+          return 0;
+        }
+        case 7: { // getpeername
+          var sock = getSocketFromFD(), addr = SYSCALLS.get(), addrlen = SYSCALLS.get();
+          if (!sock.daddr) {
+            return -107; // The socket is not connected.
+          }
+          var res = __write_sockaddr(addr, sock.family, DNS.lookup_name(sock.daddr), sock.dport);
+          assert(!res.errno);
+          return 0;
+        }
+        case 11: { // sendto
+          var sock = getSocketFromFD(), message = SYSCALLS.get(), length = SYSCALLS.get(), flags = SYSCALLS.get(), dest = getSocketAddress(true);
+          if (!dest) {
+            // send, no address provided
+            return FS.write(sock.stream, HEAP8,message, length);
+          } else {
+            // sendto an address
+            return sock.sock_ops.sendmsg(sock, HEAP8,message, length, dest.addr, dest.port);
+          }
+        }
+        case 12: { // recvfrom
+          var sock = getSocketFromFD(), buf = SYSCALLS.get(), len = SYSCALLS.get(), flags = SYSCALLS.get(), addr = SYSCALLS.get(), addrlen = SYSCALLS.get();
+          var msg = sock.sock_ops.recvmsg(sock, len);
+          if (!msg) return 0; // socket is closed
+          if (addr) {
+            var res = __write_sockaddr(addr, sock.family, DNS.lookup_name(msg.addr), msg.port);
+            assert(!res.errno);
+          }
+          HEAPU8.set(msg.buffer, buf);
+          return msg.buffer.byteLength;
+        }
+        case 14: { // setsockopt
+          return -92; // The option is unknown at the level indicated.
+        }
+        case 15: { // getsockopt
+          var sock = getSocketFromFD(), level = SYSCALLS.get(), optname = SYSCALLS.get(), optval = SYSCALLS.get(), optlen = SYSCALLS.get();
+          // Minimal getsockopt aimed at resolving https://github.com/emscripten-core/emscripten/issues/2211
+          // so only supports SOL_SOCKET with SO_ERROR.
+          if (level === 1) {
+            if (optname === 4) {
+              HEAP32[((optval)>>2)]=sock.error;
+              HEAP32[((optlen)>>2)]=4;
+              sock.error = null; // Clear the error (The SO_ERROR option obtains and then clears this field).
+              return 0;
+            }
+          }
+          return -92; // The option is unknown at the level indicated.
+        }
+        case 16: { // sendmsg
+          var sock = getSocketFromFD(), message = SYSCALLS.get(), flags = SYSCALLS.get();
+          var iov = HEAP32[(((message)+(8))>>2)];
+          var num = HEAP32[(((message)+(12))>>2)];
+          // read the address and port to send to
+          var addr, port;
+          var name = HEAP32[((message)>>2)];
+          var namelen = HEAP32[(((message)+(4))>>2)];
+          if (name) {
+            var info = __read_sockaddr(name, namelen);
+            if (info.errno) return -info.errno;
+            port = info.port;
+            addr = DNS.lookup_addr(info.addr) || info.addr;
+          }
+          // concatenate scatter-gather arrays into one message buffer
+          var total = 0;
+          for (var i = 0; i < num; i++) {
+            total += HEAP32[(((iov)+((8 * i) + 4))>>2)];
+          }
+          var view = new Uint8Array(total);
+          var offset = 0;
+          for (var i = 0; i < num; i++) {
+            var iovbase = HEAP32[(((iov)+((8 * i) + 0))>>2)];
+            var iovlen = HEAP32[(((iov)+((8 * i) + 4))>>2)];
+            for (var j = 0; j < iovlen; j++) {  
+              view[offset++] = HEAP8[(((iovbase)+(j))>>0)];
+            }
+          }
+          // write the buffer
+          return sock.sock_ops.sendmsg(sock, view, 0, total, addr, port);
+        }
+        case 17: { // recvmsg
+          var sock = getSocketFromFD(), message = SYSCALLS.get(), flags = SYSCALLS.get();
+          var iov = HEAP32[(((message)+(8))>>2)];
+          var num = HEAP32[(((message)+(12))>>2)];
+          // get the total amount of data we can read across all arrays
+          var total = 0;
+          for (var i = 0; i < num; i++) {
+            total += HEAP32[(((iov)+((8 * i) + 4))>>2)];
+          }
+          // try to read total data
+          var msg = sock.sock_ops.recvmsg(sock, total);
+          if (!msg) return 0; // socket is closed
+  
+          // TODO honor flags:
+          // MSG_OOB
+          // Requests out-of-band data. The significance and semantics of out-of-band data are protocol-specific.
+          // MSG_PEEK
+          // Peeks at the incoming message.
+          // MSG_WAITALL
+          // Requests that the function block until the full amount of data requested can be returned. The function may return a smaller amount of data if a signal is caught, if the connection is terminated, if MSG_PEEK was specified, or if an error is pending for the socket.
+  
+          // write the source address out
+          var name = HEAP32[((message)>>2)];
+          if (name) {
+            var res = __write_sockaddr(name, sock.family, DNS.lookup_name(msg.addr), msg.port);
+            assert(!res.errno);
+          }
+          // write the buffer out to the scatter-gather arrays
+          var bytesRead = 0;
+          var bytesRemaining = msg.buffer.byteLength;
+          for (var i = 0; bytesRemaining > 0 && i < num; i++) {
+            var iovbase = HEAP32[(((iov)+((8 * i) + 0))>>2)];
+            var iovlen = HEAP32[(((iov)+((8 * i) + 4))>>2)];
+            if (!iovlen) {
+              continue;
+            }
+            var length = Math.min(iovlen, bytesRemaining);
+            var buf = msg.buffer.subarray(bytesRead, bytesRead + length);
+            HEAPU8.set(buf, iovbase + bytesRead);
+            bytesRead += length;
+            bytesRemaining -= length;
+          }
+  
+          // TODO set msghdr.msg_flags
+          // MSG_EOR
+          // End of record was received (if supported by the protocol).
+          // MSG_OOB
+          // Out-of-band data was received.
+          // MSG_TRUNC
+          // Normal data was truncated.
+          // MSG_CTRUNC
+  
+          return bytesRead;
+        }
+        default: abort('unsupported socketcall syscall ' + call);
+      }
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return -e.errno;
+  }
+  }
+
   function ___syscall118(which, varargs) {SYSCALLS.varargs = varargs;
   try {
    // fsync
@@ -5022,6 +6093,18 @@ function copyTempDouble(ptr) {
         return -stream.stream_ops.fsync(stream);
       }
       return 0; // we can't do anything synchronously; the in-memory FS is already synced to
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return -e.errno;
+  }
+  }
+
+  function ___syscall12(which, varargs) {SYSCALLS.varargs = varargs;
+  try {
+   // chdir
+      var path = SYSCALLS.getStr();
+      FS.chdir(path);
+      return 0;
     } catch (e) {
     if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
     return -e.errno;
@@ -5446,6 +6529,17 @@ function copyTempDouble(ptr) {
   }
   }
 
+  function ___syscall33(which, varargs) {SYSCALLS.varargs = varargs;
+  try {
+   // access
+      var path = SYSCALLS.getStr(), amode = SYSCALLS.get();
+      return SYSCALLS.doAccess(path, amode);
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return -e.errno;
+  }
+  }
+
   function ___syscall38(which, varargs) {SYSCALLS.varargs = varargs;
   try {
    // rename
@@ -5834,6 +6928,29 @@ function copyTempDouble(ptr) {
 
   function ___unlock() {}
 
+  function _difftime(time1, time0) {
+      return time1 - time0;
+    }
+
+  
+  function _dlopen(/* ... */) {
+      abort("To use dlopen, you need to use Emscripten's linking support, see https://github.com/emscripten-core/emscripten/wiki/Linking");
+    }function _dlclose(
+  ) {
+  return _dlopen.apply(null, arguments)
+  }
+
+  function _dlerror(
+  ) {
+  return _dlopen.apply(null, arguments)
+  }
+
+
+  function _dlsym(
+  ) {
+  return _dlopen.apply(null, arguments)
+  }
+
   function _emscripten_get_heap_size() {
       return HEAP8.length;
     }
@@ -5846,6 +6963,11 @@ function copyTempDouble(ptr) {
       ___setErrNo(8);
       return -1;
     }function _execv(
+  ) {
+  return _execl.apply(null, arguments)
+  }
+
+  function _execvp(
   ) {
   return _execl.apply(null, arguments)
   }
@@ -5870,6 +6992,175 @@ function copyTempDouble(ptr) {
       return -1;
     }
 
+  function _getaddrinfo(node, service, hint, out) {
+      // Note getaddrinfo currently only returns a single addrinfo with ai_next defaulting to NULL. When NULL
+      // hints are specified or ai_family set to AF_UNSPEC or ai_socktype or ai_protocol set to 0 then we
+      // really should provide a linked list of suitable addrinfo values.
+      var addrs = [];
+      var canon = null;
+      var addr = 0;
+      var port = 0;
+      var flags = 0;
+      var family = 0;
+      var type = 0;
+      var proto = 0;
+      var ai, last;
+  
+      function allocaddrinfo(family, type, proto, canon, addr, port) {
+        var sa, salen, ai;
+        var res;
+  
+        salen = family === 10 ?
+          28 :
+          16;
+        addr = family === 10 ?
+          __inet_ntop6_raw(addr) :
+          __inet_ntop4_raw(addr);
+        sa = _malloc(salen);
+        res = __write_sockaddr(sa, family, addr, port);
+        assert(!res.errno);
+  
+        ai = _malloc(32);
+        HEAP32[(((ai)+(4))>>2)]=family;
+        HEAP32[(((ai)+(8))>>2)]=type;
+        HEAP32[(((ai)+(12))>>2)]=proto;
+        HEAP32[(((ai)+(24))>>2)]=canon;
+        HEAP32[(((ai)+(20))>>2)]=sa;
+        if (family === 10) {
+          HEAP32[(((ai)+(16))>>2)]=28;
+        } else {
+          HEAP32[(((ai)+(16))>>2)]=16;
+        }
+        HEAP32[(((ai)+(28))>>2)]=0;
+  
+        return ai;
+      }
+  
+      if (hint) {
+        flags = HEAP32[((hint)>>2)];
+        family = HEAP32[(((hint)+(4))>>2)];
+        type = HEAP32[(((hint)+(8))>>2)];
+        proto = HEAP32[(((hint)+(12))>>2)];
+      }
+      if (type && !proto) {
+        proto = type === 2 ? 17 : 6;
+      }
+      if (!type && proto) {
+        type = proto === 17 ? 2 : 1;
+      }
+  
+      // If type or proto are set to zero in hints we should really be returning multiple addrinfo values, but for
+      // now default to a TCP STREAM socket so we can at least return a sensible addrinfo given NULL hints.
+      if (proto === 0) {
+        proto = 6;
+      }
+      if (type === 0) {
+        type = 1;
+      }
+  
+      if (!node && !service) {
+        return -2;
+      }
+      if (flags & ~(1|2|4|
+          1024|8|16|32)) {
+        return -1;
+      }
+      if (hint !== 0 && (HEAP32[((hint)>>2)] & 2) && !node) {
+        return -1;
+      }
+      if (flags & 32) {
+        // TODO
+        return -2;
+      }
+      if (type !== 0 && type !== 1 && type !== 2) {
+        return -7;
+      }
+      if (family !== 0 && family !== 2 && family !== 10) {
+        return -6;
+      }
+  
+      if (service) {
+        service = UTF8ToString(service);
+        port = parseInt(service, 10);
+  
+        if (isNaN(port)) {
+          if (flags & 1024) {
+            return -2;
+          }
+          // TODO support resolving well-known service names from:
+          // http://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.txt
+          return -8;
+        }
+      }
+  
+      if (!node) {
+        if (family === 0) {
+          family = 2;
+        }
+        if ((flags & 1) === 0) {
+          if (family === 2) {
+            addr = _htonl(2130706433);
+          } else {
+            addr = [0, 0, 0, 1];
+          }
+        }
+        ai = allocaddrinfo(family, type, proto, null, addr, port);
+        HEAP32[((out)>>2)]=ai;
+        return 0;
+      }
+  
+      //
+      // try as a numeric address
+      //
+      node = UTF8ToString(node);
+      addr = __inet_pton4_raw(node);
+      if (addr !== null) {
+        // incoming node is a valid ipv4 address
+        if (family === 0 || family === 2) {
+          family = 2;
+        }
+        else if (family === 10 && (flags & 8)) {
+          addr = [0, 0, _htonl(0xffff), addr];
+          family = 10;
+        } else {
+          return -2;
+        }
+      } else {
+        addr = __inet_pton6_raw(node);
+        if (addr !== null) {
+          // incoming node is a valid ipv6 address
+          if (family === 0 || family === 10) {
+            family = 10;
+          } else {
+            return -2;
+          }
+        }
+      }
+      if (addr != null) {
+        ai = allocaddrinfo(family, type, proto, node, addr, port);
+        HEAP32[((out)>>2)]=ai;
+        return 0;
+      }
+      if (flags & 4) {
+        return -2;
+      }
+  
+      //
+      // try as a hostname
+      //
+      // resolve the hostname to a temporary fake address
+      node = DNS.lookup_name(node);
+      addr = __inet_pton4_raw(node);
+      if (family === 0) {
+        family = 2;
+      } else if (family === 10) {
+        addr = [0, 0, _htonl(0xffff), addr];
+      }
+      ai = allocaddrinfo(family, type, proto, null, addr, port);
+      HEAP32[((out)>>2)]=ai;
+      return 0;
+    }
+
   function _getenv(name) {
       // char *getenv(const char *name);
       // http://pubs.opengroup.org/onlinepubs/009695399/functions/getenv.html
@@ -5882,6 +7173,53 @@ function copyTempDouble(ptr) {
       return _getenv.ret;
     }
 
+  function _getnameinfo(sa, salen, node, nodelen, serv, servlen, flags) {
+      var info = __read_sockaddr(sa, salen);
+      if (info.errno) {
+        return -6;
+      }
+      var port = info.port;
+      var addr = info.addr;
+  
+      var overflowed = false;
+  
+      if (node && nodelen) {
+        var lookup;
+        if ((flags & 1) || !(lookup = DNS.lookup_addr(addr))) {
+          if (flags & 8) {
+            return -2;
+          }
+        } else {
+          addr = lookup;
+        }
+        var numBytesWrittenExclNull = stringToUTF8(addr, node, nodelen);
+  
+        if (numBytesWrittenExclNull+1 >= nodelen) {
+          overflowed = true;
+        }
+      }
+  
+      if (serv && servlen) {
+        port = '' + port;
+        var numBytesWrittenExclNull = stringToUTF8(port, serv, servlen);
+  
+        if (numBytesWrittenExclNull+1 >= servlen) {
+          overflowed = true;
+        }
+      }
+  
+      if (overflowed) {
+        // Note: even when we overflow, getnameinfo() is specced to write out the truncated results.
+        return -12;
+      }
+  
+      return 0;
+    }
+
+  function _getpwuid(uid) {
+      return 0; // NULL
+    }
+
   function _gettimeofday(ptr) {
       var now = Date.now();
       HEAP32[((ptr)>>2)]=(now/1000)|0; // seconds
@@ -5889,19 +7227,52 @@ function copyTempDouble(ptr) {
       return 0;
     }
 
+  
+  var ___tm_timezone=(stringToUTF8("GMT", 860160, 4), 860160);function _gmtime_r(time, tmPtr) {
+      var date = new Date(HEAP32[((time)>>2)]*1000);
+      HEAP32[((tmPtr)>>2)]=date.getUTCSeconds();
+      HEAP32[(((tmPtr)+(4))>>2)]=date.getUTCMinutes();
+      HEAP32[(((tmPtr)+(8))>>2)]=date.getUTCHours();
+      HEAP32[(((tmPtr)+(12))>>2)]=date.getUTCDate();
+      HEAP32[(((tmPtr)+(16))>>2)]=date.getUTCMonth();
+      HEAP32[(((tmPtr)+(20))>>2)]=date.getUTCFullYear()-1900;
+      HEAP32[(((tmPtr)+(24))>>2)]=date.getUTCDay();
+      HEAP32[(((tmPtr)+(36))>>2)]=0;
+      HEAP32[(((tmPtr)+(32))>>2)]=0;
+      var start = Date.UTC(date.getUTCFullYear(), 0, 1, 0, 0, 0, 0);
+      var yday = ((date.getTime() - start) / (1000 * 60 * 60 * 24))|0;
+      HEAP32[(((tmPtr)+(28))>>2)]=yday;
+      HEAP32[(((tmPtr)+(40))>>2)]=___tm_timezone;
+  
+      return tmPtr;
+    }
+
+  function _kill(pid, sig) {
+      // http://pubs.opengroup.org/onlinepubs/000095399/functions/kill.html
+      // Makes no sense in a single-process environment.
+  	  // Should kill itself somtimes depending on `pid`
+      err('Calling stub instead of kill()');
+      ___setErrNo(ERRNO_CODES.EPERM);
+      return -1;
+    }
+
    
 
    
+
+  function _llvm_bswap_i64(l, h) {
+      var retl = _llvm_bswap_i32(h)>>>0;
+      var reth = _llvm_bswap_i32(l)>>>0;
+      return ((setTempRet0(reth),retl)|0);
+    }
 
   function _llvm_trap() {
       abort('trap!');
     }
 
   
-  var ___tm_current=320048;
+  var ___tm_current=860112;
   
-  
-  var ___tm_timezone=(stringToUTF8("GMT", 320096, 4), 320096);
   
   function _tzset() {
       // TODO: Use (malleable) environment variables instead of system settings.
@@ -6013,43 +7384,7 @@ function copyTempDouble(ptr) {
       return (date.getTime() / 1000)|0;
     }
 
-  
-  function _usleep(useconds) {
-      // int usleep(useconds_t useconds);
-      // http://pubs.opengroup.org/onlinepubs/000095399/functions/usleep.html
-      // We're single-threaded, so use a busy loop. Super-ugly.
-      var msec = useconds / 1000;
-      if ((ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) && self['performance'] && self['performance']['now']) {
-        var start = self['performance']['now']();
-        while (self['performance']['now']() - start < msec) {
-          // Do nothing.
-        }
-      } else {
-        var start = Date.now();
-        while (Date.now() - start < msec) {
-          // Do nothing.
-        }
-      }
-      return 0;
-    }
-  Module["_usleep"] = _usleep;function _nanosleep(rqtp, rmtp) {
-      // int nanosleep(const struct timespec  *rqtp, struct timespec *rmtp);
-      if (rqtp === 0) {
-        ___setErrNo(22);
-        return -1;
-      }
-      var seconds = HEAP32[((rqtp)>>2)];
-      var nanoseconds = HEAP32[(((rqtp)+(4))>>2)];
-      if (nanoseconds < 0 || nanoseconds > 999999999 || seconds < 0) {
-        ___setErrNo(22);
-        return -1;
-      }
-      if (rmtp !== 0) {
-        HEAP32[((rmtp)>>2)]=0;
-        HEAP32[(((rmtp)+(4))>>2)]=0;
-      }
-      return _usleep((seconds * 1e6) + (nanoseconds / 1000));
-    }
+  function _pthread_setcancelstate() { return 0; }
 
   
   
@@ -6058,6 +7393,25 @@ function copyTempDouble(ptr) {
     }function _emscripten_resize_heap(requestedSize) {
       abortOnCannotGrowMemory(requestedSize);
     } 
+
+  function _setenv(envname, envval, overwrite) {
+      // int setenv(const char *envname, const char *envval, int overwrite);
+      // http://pubs.opengroup.org/onlinepubs/009695399/functions/setenv.html
+      if (envname === 0) {
+        ___setErrNo(22);
+        return -1;
+      }
+      var name = UTF8ToString(envname);
+      var val = UTF8ToString(envval);
+      if (name === '' || name.indexOf('=') !== -1) {
+        ___setErrNo(22);
+        return -1;
+      }
+      if (ENV.hasOwnProperty(name) && !overwrite) return 0;
+      ENV[name] = val;
+      ___buildEnvironment(__get_environ());
+      return 0;
+    }
 
   function _sigaction(signum, act, oldact) {
       //int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact);
@@ -6073,6 +7427,363 @@ function copyTempDouble(ptr) {
         err('Calling stub instead of signal()');
       }
       return 0;
+    }
+
+  
+  function __isLeapYear(year) {
+        return year%4 === 0 && (year%100 !== 0 || year%400 === 0);
+    }
+  
+  function __arraySum(array, index) {
+      var sum = 0;
+      for (var i = 0; i <= index; sum += array[i++]);
+      return sum;
+    }
+  
+  
+  var __MONTH_DAYS_LEAP=[31,29,31,30,31,30,31,31,30,31,30,31];
+  
+  var __MONTH_DAYS_REGULAR=[31,28,31,30,31,30,31,31,30,31,30,31];function __addDays(date, days) {
+      var newDate = new Date(date.getTime());
+      while(days > 0) {
+        var leap = __isLeapYear(newDate.getFullYear());
+        var currentMonth = newDate.getMonth();
+        var daysInCurrentMonth = (leap ? __MONTH_DAYS_LEAP : __MONTH_DAYS_REGULAR)[currentMonth];
+  
+        if (days > daysInCurrentMonth-newDate.getDate()) {
+          // we spill over to next month
+          days -= (daysInCurrentMonth-newDate.getDate()+1);
+          newDate.setDate(1);
+          if (currentMonth < 11) {
+            newDate.setMonth(currentMonth+1)
+          } else {
+            newDate.setMonth(0);
+            newDate.setFullYear(newDate.getFullYear()+1);
+          }
+        } else {
+          // we stay in current month
+          newDate.setDate(newDate.getDate()+days);
+          return newDate;
+        }
+      }
+  
+      return newDate;
+    }function _strftime(s, maxsize, format, tm) {
+      // size_t strftime(char *restrict s, size_t maxsize, const char *restrict format, const struct tm *restrict timeptr);
+      // http://pubs.opengroup.org/onlinepubs/009695399/functions/strftime.html
+  
+      var tm_zone = HEAP32[(((tm)+(40))>>2)];
+  
+      var date = {
+        tm_sec: HEAP32[((tm)>>2)],
+        tm_min: HEAP32[(((tm)+(4))>>2)],
+        tm_hour: HEAP32[(((tm)+(8))>>2)],
+        tm_mday: HEAP32[(((tm)+(12))>>2)],
+        tm_mon: HEAP32[(((tm)+(16))>>2)],
+        tm_year: HEAP32[(((tm)+(20))>>2)],
+        tm_wday: HEAP32[(((tm)+(24))>>2)],
+        tm_yday: HEAP32[(((tm)+(28))>>2)],
+        tm_isdst: HEAP32[(((tm)+(32))>>2)],
+        tm_gmtoff: HEAP32[(((tm)+(36))>>2)],
+        tm_zone: tm_zone ? UTF8ToString(tm_zone) : ''
+      };
+  
+      var pattern = UTF8ToString(format);
+  
+      // expand format
+      var EXPANSION_RULES_1 = {
+        '%c': '%a %b %d %H:%M:%S %Y',     // Replaced by the locale's appropriate date and time representation - e.g., Mon Aug  3 14:02:01 2013
+        '%D': '%m/%d/%y',                 // Equivalent to %m / %d / %y
+        '%F': '%Y-%m-%d',                 // Equivalent to %Y - %m - %d
+        '%h': '%b',                       // Equivalent to %b
+        '%r': '%I:%M:%S %p',              // Replaced by the time in a.m. and p.m. notation
+        '%R': '%H:%M',                    // Replaced by the time in 24-hour notation
+        '%T': '%H:%M:%S',                 // Replaced by the time
+        '%x': '%m/%d/%y',                 // Replaced by the locale's appropriate date representation
+        '%X': '%H:%M:%S',                 // Replaced by the locale's appropriate time representation
+        // Modified Conversion Specifiers
+        '%Ec': '%c',                      // Replaced by the locale's alternative appropriate date and time representation.
+        '%EC': '%C',                      // Replaced by the name of the base year (period) in the locale's alternative representation.
+        '%Ex': '%m/%d/%y',                // Replaced by the locale's alternative date representation.
+        '%EX': '%H:%M:%S',                // Replaced by the locale's alternative time representation.
+        '%Ey': '%y',                      // Replaced by the offset from %EC (year only) in the locale's alternative representation.
+        '%EY': '%Y',                      // Replaced by the full alternative year representation.
+        '%Od': '%d',                      // Replaced by the day of the month, using the locale's alternative numeric symbols, filled as needed with leading zeros if there is any alternative symbol for zero; otherwise, with leading <space> characters.
+        '%Oe': '%e',                      // Replaced by the day of the month, using the locale's alternative numeric symbols, filled as needed with leading <space> characters.
+        '%OH': '%H',                      // Replaced by the hour (24-hour clock) using the locale's alternative numeric symbols.
+        '%OI': '%I',                      // Replaced by the hour (12-hour clock) using the locale's alternative numeric symbols.
+        '%Om': '%m',                      // Replaced by the month using the locale's alternative numeric symbols.
+        '%OM': '%M',                      // Replaced by the minutes using the locale's alternative numeric symbols.
+        '%OS': '%S',                      // Replaced by the seconds using the locale's alternative numeric symbols.
+        '%Ou': '%u',                      // Replaced by the weekday as a number in the locale's alternative representation (Monday=1).
+        '%OU': '%U',                      // Replaced by the week number of the year (Sunday as the first day of the week, rules corresponding to %U ) using the locale's alternative numeric symbols.
+        '%OV': '%V',                      // Replaced by the week number of the year (Monday as the first day of the week, rules corresponding to %V ) using the locale's alternative numeric symbols.
+        '%Ow': '%w',                      // Replaced by the number of the weekday (Sunday=0) using the locale's alternative numeric symbols.
+        '%OW': '%W',                      // Replaced by the week number of the year (Monday as the first day of the week) using the locale's alternative numeric symbols.
+        '%Oy': '%y',                      // Replaced by the year (offset from %C ) using the locale's alternative numeric symbols.
+      };
+      for (var rule in EXPANSION_RULES_1) {
+        pattern = pattern.replace(new RegExp(rule, 'g'), EXPANSION_RULES_1[rule]);
+      }
+  
+      var WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  
+      function leadingSomething(value, digits, character) {
+        var str = typeof value === 'number' ? value.toString() : (value || '');
+        while (str.length < digits) {
+          str = character[0]+str;
+        }
+        return str;
+      }
+  
+      function leadingNulls(value, digits) {
+        return leadingSomething(value, digits, '0');
+      }
+  
+      function compareByDay(date1, date2) {
+        function sgn(value) {
+          return value < 0 ? -1 : (value > 0 ? 1 : 0);
+        }
+  
+        var compare;
+        if ((compare = sgn(date1.getFullYear()-date2.getFullYear())) === 0) {
+          if ((compare = sgn(date1.getMonth()-date2.getMonth())) === 0) {
+            compare = sgn(date1.getDate()-date2.getDate());
+          }
+        }
+        return compare;
+      }
+  
+      function getFirstWeekStartDate(janFourth) {
+          switch (janFourth.getDay()) {
+            case 0: // Sunday
+              return new Date(janFourth.getFullYear()-1, 11, 29);
+            case 1: // Monday
+              return janFourth;
+            case 2: // Tuesday
+              return new Date(janFourth.getFullYear(), 0, 3);
+            case 3: // Wednesday
+              return new Date(janFourth.getFullYear(), 0, 2);
+            case 4: // Thursday
+              return new Date(janFourth.getFullYear(), 0, 1);
+            case 5: // Friday
+              return new Date(janFourth.getFullYear()-1, 11, 31);
+            case 6: // Saturday
+              return new Date(janFourth.getFullYear()-1, 11, 30);
+          }
+      }
+  
+      function getWeekBasedYear(date) {
+          var thisDate = __addDays(new Date(date.tm_year+1900, 0, 1), date.tm_yday);
+  
+          var janFourthThisYear = new Date(thisDate.getFullYear(), 0, 4);
+          var janFourthNextYear = new Date(thisDate.getFullYear()+1, 0, 4);
+  
+          var firstWeekStartThisYear = getFirstWeekStartDate(janFourthThisYear);
+          var firstWeekStartNextYear = getFirstWeekStartDate(janFourthNextYear);
+  
+          if (compareByDay(firstWeekStartThisYear, thisDate) <= 0) {
+            // this date is after the start of the first week of this year
+            if (compareByDay(firstWeekStartNextYear, thisDate) <= 0) {
+              return thisDate.getFullYear()+1;
+            } else {
+              return thisDate.getFullYear();
+            }
+          } else {
+            return thisDate.getFullYear()-1;
+          }
+      }
+  
+      var EXPANSION_RULES_2 = {
+        '%a': function(date) {
+          return WEEKDAYS[date.tm_wday].substring(0,3);
+        },
+        '%A': function(date) {
+          return WEEKDAYS[date.tm_wday];
+        },
+        '%b': function(date) {
+          return MONTHS[date.tm_mon].substring(0,3);
+        },
+        '%B': function(date) {
+          return MONTHS[date.tm_mon];
+        },
+        '%C': function(date) {
+          var year = date.tm_year+1900;
+          return leadingNulls((year/100)|0,2);
+        },
+        '%d': function(date) {
+          return leadingNulls(date.tm_mday, 2);
+        },
+        '%e': function(date) {
+          return leadingSomething(date.tm_mday, 2, ' ');
+        },
+        '%g': function(date) {
+          // %g, %G, and %V give values according to the ISO 8601:2000 standard week-based year.
+          // In this system, weeks begin on a Monday and week 1 of the year is the week that includes
+          // January 4th, which is also the week that includes the first Thursday of the year, and
+          // is also the first week that contains at least four days in the year.
+          // If the first Monday of January is the 2nd, 3rd, or 4th, the preceding days are part of
+          // the last week of the preceding year; thus, for Saturday 2nd January 1999,
+          // %G is replaced by 1998 and %V is replaced by 53. If December 29th, 30th,
+          // or 31st is a Monday, it and any following days are part of week 1 of the following year.
+          // Thus, for Tuesday 30th December 1997, %G is replaced by 1998 and %V is replaced by 01.
+  
+          return getWeekBasedYear(date).toString().substring(2);
+        },
+        '%G': function(date) {
+          return getWeekBasedYear(date);
+        },
+        '%H': function(date) {
+          return leadingNulls(date.tm_hour, 2);
+        },
+        '%I': function(date) {
+          var twelveHour = date.tm_hour;
+          if (twelveHour == 0) twelveHour = 12;
+          else if (twelveHour > 12) twelveHour -= 12;
+          return leadingNulls(twelveHour, 2);
+        },
+        '%j': function(date) {
+          // Day of the year (001-366)
+          return leadingNulls(date.tm_mday+__arraySum(__isLeapYear(date.tm_year+1900) ? __MONTH_DAYS_LEAP : __MONTH_DAYS_REGULAR, date.tm_mon-1), 3);
+        },
+        '%m': function(date) {
+          return leadingNulls(date.tm_mon+1, 2);
+        },
+        '%M': function(date) {
+          return leadingNulls(date.tm_min, 2);
+        },
+        '%n': function() {
+          return '\n';
+        },
+        '%p': function(date) {
+          if (date.tm_hour >= 0 && date.tm_hour < 12) {
+            return 'AM';
+          } else {
+            return 'PM';
+          }
+        },
+        '%S': function(date) {
+          return leadingNulls(date.tm_sec, 2);
+        },
+        '%t': function() {
+          return '\t';
+        },
+        '%u': function(date) {
+          return date.tm_wday || 7;
+        },
+        '%U': function(date) {
+          // Replaced by the week number of the year as a decimal number [00,53].
+          // The first Sunday of January is the first day of week 1;
+          // days in the new year before this are in week 0. [ tm_year, tm_wday, tm_yday]
+          var janFirst = new Date(date.tm_year+1900, 0, 1);
+          var firstSunday = janFirst.getDay() === 0 ? janFirst : __addDays(janFirst, 7-janFirst.getDay());
+          var endDate = new Date(date.tm_year+1900, date.tm_mon, date.tm_mday);
+  
+          // is target date after the first Sunday?
+          if (compareByDay(firstSunday, endDate) < 0) {
+            // calculate difference in days between first Sunday and endDate
+            var februaryFirstUntilEndMonth = __arraySum(__isLeapYear(endDate.getFullYear()) ? __MONTH_DAYS_LEAP : __MONTH_DAYS_REGULAR, endDate.getMonth()-1)-31;
+            var firstSundayUntilEndJanuary = 31-firstSunday.getDate();
+            var days = firstSundayUntilEndJanuary+februaryFirstUntilEndMonth+endDate.getDate();
+            return leadingNulls(Math.ceil(days/7), 2);
+          }
+  
+          return compareByDay(firstSunday, janFirst) === 0 ? '01': '00';
+        },
+        '%V': function(date) {
+          // Replaced by the week number of the year (Monday as the first day of the week)
+          // as a decimal number [01,53]. If the week containing 1 January has four
+          // or more days in the new year, then it is considered week 1.
+          // Otherwise, it is the last week of the previous year, and the next week is week 1.
+          // Both January 4th and the first Thursday of January are always in week 1. [ tm_year, tm_wday, tm_yday]
+          var janFourthThisYear = new Date(date.tm_year+1900, 0, 4);
+          var janFourthNextYear = new Date(date.tm_year+1901, 0, 4);
+  
+          var firstWeekStartThisYear = getFirstWeekStartDate(janFourthThisYear);
+          var firstWeekStartNextYear = getFirstWeekStartDate(janFourthNextYear);
+  
+          var endDate = __addDays(new Date(date.tm_year+1900, 0, 1), date.tm_yday);
+  
+          if (compareByDay(endDate, firstWeekStartThisYear) < 0) {
+            // if given date is before this years first week, then it belongs to the 53rd week of last year
+            return '53';
+          }
+  
+          if (compareByDay(firstWeekStartNextYear, endDate) <= 0) {
+            // if given date is after next years first week, then it belongs to the 01th week of next year
+            return '01';
+          }
+  
+          // given date is in between CW 01..53 of this calendar year
+          var daysDifference;
+          if (firstWeekStartThisYear.getFullYear() < date.tm_year+1900) {
+            // first CW of this year starts last year
+            daysDifference = date.tm_yday+32-firstWeekStartThisYear.getDate()
+          } else {
+            // first CW of this year starts this year
+            daysDifference = date.tm_yday+1-firstWeekStartThisYear.getDate();
+          }
+          return leadingNulls(Math.ceil(daysDifference/7), 2);
+        },
+        '%w': function(date) {
+          return date.tm_wday;
+        },
+        '%W': function(date) {
+          // Replaced by the week number of the year as a decimal number [00,53].
+          // The first Monday of January is the first day of week 1;
+          // days in the new year before this are in week 0. [ tm_year, tm_wday, tm_yday]
+          var janFirst = new Date(date.tm_year, 0, 1);
+          var firstMonday = janFirst.getDay() === 1 ? janFirst : __addDays(janFirst, janFirst.getDay() === 0 ? 1 : 7-janFirst.getDay()+1);
+          var endDate = new Date(date.tm_year+1900, date.tm_mon, date.tm_mday);
+  
+          // is target date after the first Monday?
+          if (compareByDay(firstMonday, endDate) < 0) {
+            var februaryFirstUntilEndMonth = __arraySum(__isLeapYear(endDate.getFullYear()) ? __MONTH_DAYS_LEAP : __MONTH_DAYS_REGULAR, endDate.getMonth()-1)-31;
+            var firstMondayUntilEndJanuary = 31-firstMonday.getDate();
+            var days = firstMondayUntilEndJanuary+februaryFirstUntilEndMonth+endDate.getDate();
+            return leadingNulls(Math.ceil(days/7), 2);
+          }
+          return compareByDay(firstMonday, janFirst) === 0 ? '01': '00';
+        },
+        '%y': function(date) {
+          // Replaced by the last two digits of the year as a decimal number [00,99]. [ tm_year]
+          return (date.tm_year+1900).toString().substring(2);
+        },
+        '%Y': function(date) {
+          // Replaced by the year as a decimal number (for example, 1997). [ tm_year]
+          return date.tm_year+1900;
+        },
+        '%z': function(date) {
+          // Replaced by the offset from UTC in the ISO 8601:2000 standard format ( +hhmm or -hhmm ).
+          // For example, "-0430" means 4 hours 30 minutes behind UTC (west of Greenwich).
+          var off = date.tm_gmtoff;
+          var ahead = off >= 0;
+          off = Math.abs(off) / 60;
+          // convert from minutes into hhmm format (which means 60 minutes = 100 units)
+          off = (off / 60)*100 + (off % 60);
+          return (ahead ? '+' : '-') + String("0000" + off).slice(-4);
+        },
+        '%Z': function(date) {
+          return date.tm_zone;
+        },
+        '%%': function() {
+          return '%';
+        }
+      };
+      for (var rule in EXPANSION_RULES_2) {
+        if (pattern.indexOf(rule) >= 0) {
+          pattern = pattern.replace(new RegExp(rule, 'g'), EXPANSION_RULES_2[rule](date));
+        }
+      }
+  
+      var bytes = intArrayFromString(pattern, false);
+      if (bytes.length > maxsize) {
+        return 0;
+      }
+  
+      writeArrayToMemory(bytes, s);
+      return bytes.length-1;
     }
 
   function _sysconf(name) {
@@ -6223,12 +7934,49 @@ function copyTempDouble(ptr) {
       return -1;
     }
 
+  function _system(command) {
+      // int system(const char *command);
+      // http://pubs.opengroup.org/onlinepubs/000095399/functions/system.html
+      // Can't call external programs.
+      ___setErrNo(11);
+      return -1;
+    }
+
   function _time(ptr) {
       var ret = (Date.now()/1000)|0;
       if (ptr) {
         HEAP32[((ptr)>>2)]=ret;
       }
       return ret;
+    }
+
+  function _times(buffer) {
+      // clock_t times(struct tms *buffer);
+      // http://pubs.opengroup.org/onlinepubs/009695399/functions/times.html
+      // NOTE: This is fake, since we can't calculate real CPU time usage in JS.
+      if (buffer !== 0) {
+        _memset(buffer, 0, 16);
+      }
+      return 0;
+    }
+
+  function _unsetenv(name) {
+      // int unsetenv(const char *name);
+      // http://pubs.opengroup.org/onlinepubs/009695399/functions/unsetenv.html
+      if (name === 0) {
+        ___setErrNo(22);
+        return -1;
+      }
+      name = UTF8ToString(name);
+      if (name === '' || name.indexOf('=') !== -1) {
+        ___setErrNo(22);
+        return -1;
+      }
+      if (ENV.hasOwnProperty(name)) {
+        delete ENV[name];
+        ___buildEnvironment(__get_environ());
+      }
+      return 0;
     }
 
   function _utimes(path, times) {
@@ -6310,7 +8058,69 @@ function intArrayToString(array) {
 
 // ASM_LIBRARY EXTERN PRIMITIVES: Int8Array,Int32Array
 
+function nullFunc_d(x) { abortFnPtrError(x, 'd'); }
+function nullFunc_di(x) { abortFnPtrError(x, 'di'); }
+function nullFunc_dii(x) { abortFnPtrError(x, 'dii'); }
 function nullFunc_diii(x) { abortFnPtrError(x, 'diii'); }
+function nullFunc_diiii(x) { abortFnPtrError(x, 'diiii'); }
+function nullFunc_diiiii(x) { abortFnPtrError(x, 'diiiii'); }
+function nullFunc_diiiiii(x) { abortFnPtrError(x, 'diiiiii'); }
+function nullFunc_diiiiiii(x) { abortFnPtrError(x, 'diiiiiii'); }
+function nullFunc_diiiiiiii(x) { abortFnPtrError(x, 'diiiiiiii'); }
+function nullFunc_diiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiii'); }
+function nullFunc_diiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiii'); }
+function nullFunc_diiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'diiiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_f(x) { abortFnPtrError(x, 'f'); }
+function nullFunc_fi(x) { abortFnPtrError(x, 'fi'); }
+function nullFunc_fii(x) { abortFnPtrError(x, 'fii'); }
+function nullFunc_fiii(x) { abortFnPtrError(x, 'fiii'); }
+function nullFunc_fiiii(x) { abortFnPtrError(x, 'fiiii'); }
+function nullFunc_fiiiii(x) { abortFnPtrError(x, 'fiiiii'); }
+function nullFunc_fiiiiii(x) { abortFnPtrError(x, 'fiiiiii'); }
+function nullFunc_fiiiiiii(x) { abortFnPtrError(x, 'fiiiiiii'); }
+function nullFunc_fiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiii'); }
+function nullFunc_fiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiii'); }
+function nullFunc_fiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'fiiiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_i(x) { abortFnPtrError(x, 'i'); }
 function nullFunc_ii(x) { abortFnPtrError(x, 'ii'); }
 function nullFunc_iidiiii(x) { abortFnPtrError(x, 'iidiiii'); }
 function nullFunc_iii(x) { abortFnPtrError(x, 'iii'); }
@@ -6321,11 +8131,68 @@ function nullFunc_iiiiii(x) { abortFnPtrError(x, 'iiiiii'); }
 function nullFunc_iiiiiid(x) { abortFnPtrError(x, 'iiiiiid'); }
 function nullFunc_iiiiiii(x) { abortFnPtrError(x, 'iiiiiii'); }
 function nullFunc_iiiiiiii(x) { abortFnPtrError(x, 'iiiiiiii'); }
+function nullFunc_iiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiii'); }
+function nullFunc_iiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiii'); }
+function nullFunc_iiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiii'); }
 function nullFunc_iiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'iiiiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_iiiiij(x) { abortFnPtrError(x, 'iiiiij'); }
+function nullFunc_iiiiiji(x) { abortFnPtrError(x, 'iiiiiji'); }
 function nullFunc_iiiij(x) { abortFnPtrError(x, 'iiiij'); }
+function nullFunc_iiij(x) { abortFnPtrError(x, 'iiij'); }
+function nullFunc_iiiji(x) { abortFnPtrError(x, 'iiiji'); }
 function nullFunc_iij(x) { abortFnPtrError(x, 'iij'); }
+function nullFunc_iiji(x) { abortFnPtrError(x, 'iiji'); }
 function nullFunc_iijji(x) { abortFnPtrError(x, 'iijji'); }
+function nullFunc_j(x) { abortFnPtrError(x, 'j'); }
 function nullFunc_ji(x) { abortFnPtrError(x, 'ji'); }
+function nullFunc_jii(x) { abortFnPtrError(x, 'jii'); }
+function nullFunc_jiii(x) { abortFnPtrError(x, 'jiii'); }
+function nullFunc_jiiii(x) { abortFnPtrError(x, 'jiiii'); }
+function nullFunc_jiiiii(x) { abortFnPtrError(x, 'jiiiii'); }
+function nullFunc_jiiiiii(x) { abortFnPtrError(x, 'jiiiiii'); }
+function nullFunc_jiiiiiii(x) { abortFnPtrError(x, 'jiiiiiii'); }
+function nullFunc_jiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiii'); }
+function nullFunc_jiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiii'); }
+function nullFunc_jiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
+function nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiiiiii(x) { abortFnPtrError(x, 'jiiiiiiiiiiiiiiiiiiiiiiiiiiiiii'); }
 function nullFunc_jiji(x) { abortFnPtrError(x, 'jiji'); }
 function nullFunc_v(x) { abortFnPtrError(x, 'v'); }
 function nullFunc_vi(x) { abortFnPtrError(x, 'vi'); }
@@ -6345,7 +8212,69 @@ var asmLibraryArg = {
   "setTempRet0": setTempRet0,
   "getTempRet0": getTempRet0,
   "abortStackOverflow": abortStackOverflow,
+  "nullFunc_d": nullFunc_d,
+  "nullFunc_di": nullFunc_di,
+  "nullFunc_dii": nullFunc_dii,
   "nullFunc_diii": nullFunc_diii,
+  "nullFunc_diiii": nullFunc_diiii,
+  "nullFunc_diiiii": nullFunc_diiiii,
+  "nullFunc_diiiiii": nullFunc_diiiiii,
+  "nullFunc_diiiiiii": nullFunc_diiiiiii,
+  "nullFunc_diiiiiiii": nullFunc_diiiiiiii,
+  "nullFunc_diiiiiiiii": nullFunc_diiiiiiiii,
+  "nullFunc_diiiiiiiiii": nullFunc_diiiiiiiiii,
+  "nullFunc_diiiiiiiiiii": nullFunc_diiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiii": nullFunc_diiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiii": nullFunc_diiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_diiiiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_f": nullFunc_f,
+  "nullFunc_fi": nullFunc_fi,
+  "nullFunc_fii": nullFunc_fii,
+  "nullFunc_fiii": nullFunc_fiii,
+  "nullFunc_fiiii": nullFunc_fiiii,
+  "nullFunc_fiiiii": nullFunc_fiiiii,
+  "nullFunc_fiiiiii": nullFunc_fiiiiii,
+  "nullFunc_fiiiiiii": nullFunc_fiiiiiii,
+  "nullFunc_fiiiiiiii": nullFunc_fiiiiiiii,
+  "nullFunc_fiiiiiiiii": nullFunc_fiiiiiiiii,
+  "nullFunc_fiiiiiiiiii": nullFunc_fiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiii": nullFunc_fiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiii": nullFunc_fiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_fiiiiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_i": nullFunc_i,
   "nullFunc_ii": nullFunc_ii,
   "nullFunc_iidiiii": nullFunc_iidiiii,
   "nullFunc_iii": nullFunc_iii,
@@ -6356,11 +8285,68 @@ var asmLibraryArg = {
   "nullFunc_iiiiiid": nullFunc_iiiiiid,
   "nullFunc_iiiiiii": nullFunc_iiiiiii,
   "nullFunc_iiiiiiii": nullFunc_iiiiiiii,
+  "nullFunc_iiiiiiiii": nullFunc_iiiiiiiii,
+  "nullFunc_iiiiiiiiii": nullFunc_iiiiiiiiii,
+  "nullFunc_iiiiiiiiiii": nullFunc_iiiiiiiiiii,
   "nullFunc_iiiiiiiiiiii": nullFunc_iiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiii": nullFunc_iiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_iiiiiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_iiiiij": nullFunc_iiiiij,
+  "nullFunc_iiiiiji": nullFunc_iiiiiji,
   "nullFunc_iiiij": nullFunc_iiiij,
+  "nullFunc_iiij": nullFunc_iiij,
+  "nullFunc_iiiji": nullFunc_iiiji,
   "nullFunc_iij": nullFunc_iij,
+  "nullFunc_iiji": nullFunc_iiji,
   "nullFunc_iijji": nullFunc_iijji,
+  "nullFunc_j": nullFunc_j,
   "nullFunc_ji": nullFunc_ji,
+  "nullFunc_jii": nullFunc_jii,
+  "nullFunc_jiii": nullFunc_jiii,
+  "nullFunc_jiiii": nullFunc_jiiii,
+  "nullFunc_jiiiii": nullFunc_jiiiii,
+  "nullFunc_jiiiiii": nullFunc_jiiiiii,
+  "nullFunc_jiiiiiii": nullFunc_jiiiiiii,
+  "nullFunc_jiiiiiiii": nullFunc_jiiiiiiii,
+  "nullFunc_jiiiiiiiii": nullFunc_jiiiiiiiii,
+  "nullFunc_jiiiiiiiiii": nullFunc_jiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiii": nullFunc_jiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiii": nullFunc_jiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiiiii,
+  "nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiiiiii": nullFunc_jiiiiiiiiiiiiiiiiiiiiiiiiiiiiii,
   "nullFunc_jiji": nullFunc_jiji,
   "nullFunc_v": nullFunc_v,
   "nullFunc_vi": nullFunc_vi,
@@ -6377,7 +8363,9 @@ var asmLibraryArg = {
   "___lock": ___lock,
   "___setErrNo": ___setErrNo,
   "___syscall10": ___syscall10,
+  "___syscall102": ___syscall102,
   "___syscall118": ___syscall118,
+  "___syscall12": ___syscall12,
   "___syscall122": ___syscall122,
   "___syscall140": ___syscall140,
   "___syscall142": ___syscall142,
@@ -6399,6 +8387,7 @@ var asmLibraryArg = {
   "___syscall221": ___syscall221,
   "___syscall268": ___syscall268,
   "___syscall3": ___syscall3,
+  "___syscall33": ___syscall33,
   "___syscall38": ___syscall38,
   "___syscall39": ___syscall39,
   "___syscall4": ___syscall4,
@@ -6412,7 +8401,21 @@ var asmLibraryArg = {
   "___syscall85": ___syscall85,
   "___syscall9": ___syscall9,
   "___unlock": ___unlock,
+  "__addDays": __addDays,
+  "__arraySum": __arraySum,
+  "__inet_ntop4_raw": __inet_ntop4_raw,
+  "__inet_ntop6_raw": __inet_ntop6_raw,
+  "__inet_pton4_raw": __inet_pton4_raw,
+  "__inet_pton6_raw": __inet_pton6_raw,
+  "__isLeapYear": __isLeapYear,
+  "__read_sockaddr": __read_sockaddr,
+  "__write_sockaddr": __write_sockaddr,
   "_clock_gettime": _clock_gettime,
+  "_difftime": _difftime,
+  "_dlclose": _dlclose,
+  "_dlerror": _dlerror,
+  "_dlopen": _dlopen,
+  "_dlsym": _dlsym,
   "_emscripten_get_heap_size": _emscripten_get_heap_size,
   "_emscripten_get_now": _emscripten_get_now,
   "_emscripten_get_now_is_monotonic": _emscripten_get_now_is_monotonic,
@@ -6420,22 +8423,33 @@ var asmLibraryArg = {
   "_emscripten_resize_heap": _emscripten_resize_heap,
   "_execl": _execl,
   "_execv": _execv,
+  "_execvp": _execvp,
   "_exit": _exit,
   "_flock": _flock,
   "_fork": _fork,
+  "_getaddrinfo": _getaddrinfo,
   "_getenv": _getenv,
+  "_getnameinfo": _getnameinfo,
+  "_getpwuid": _getpwuid,
   "_gettimeofday": _gettimeofday,
+  "_gmtime_r": _gmtime_r,
+  "_kill": _kill,
+  "_llvm_bswap_i64": _llvm_bswap_i64,
   "_llvm_trap": _llvm_trap,
   "_localtime": _localtime,
   "_localtime_r": _localtime_r,
   "_mktime": _mktime,
-  "_nanosleep": _nanosleep,
+  "_pthread_setcancelstate": _pthread_setcancelstate,
+  "_setenv": _setenv,
   "_sigaction": _sigaction,
   "_signal": _signal,
+  "_strftime": _strftime,
   "_sysconf": _sysconf,
+  "_system": _system,
   "_time": _time,
+  "_times": _times,
   "_tzset": _tzset,
-  "_usleep": _usleep,
+  "_unsetenv": _unsetenv,
   "_utimes": _utimes,
   "_wait": _wait,
   "_waitpid": _waitpid,
@@ -6590,10 +8604,382 @@ var stackSave = Module["stackSave"] = function() {
   return Module["asm"]["stackSave"].apply(null, arguments)
 };
 
+var dynCall_d = Module["dynCall_d"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_d"].apply(null, arguments)
+};
+
+var dynCall_di = Module["dynCall_di"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_di"].apply(null, arguments)
+};
+
+var dynCall_dii = Module["dynCall_dii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_dii"].apply(null, arguments)
+};
+
 var dynCall_diii = Module["dynCall_diii"] = function() {
   assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
   assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
   return Module["asm"]["dynCall_diii"].apply(null, arguments)
+};
+
+var dynCall_diiii = Module["dynCall_diiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiii"].apply(null, arguments)
+};
+
+var dynCall_diiiii = Module["dynCall_diiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiii = Module["dynCall_diiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiii = Module["dynCall_diiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiii = Module["dynCall_diiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiii = Module["dynCall_diiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiii = Module["dynCall_diiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiii = Module["dynCall_diiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiii = Module["dynCall_diiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_diiiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_f = Module["dynCall_f"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_f"].apply(null, arguments)
+};
+
+var dynCall_fi = Module["dynCall_fi"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fi"].apply(null, arguments)
+};
+
+var dynCall_fii = Module["dynCall_fii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fii"].apply(null, arguments)
+};
+
+var dynCall_fiii = Module["dynCall_fiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiii"].apply(null, arguments)
+};
+
+var dynCall_fiiii = Module["dynCall_fiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiii = Module["dynCall_fiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiii = Module["dynCall_fiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiii = Module["dynCall_fiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiii = Module["dynCall_fiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiii = Module["dynCall_fiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiii = Module["dynCall_fiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiii = Module["dynCall_fiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_fiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_i = Module["dynCall_i"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_i"].apply(null, arguments)
 };
 
 var dynCall_ii = Module["dynCall_ii"] = function() {
@@ -6656,10 +9042,154 @@ var dynCall_iiiiiiii = Module["dynCall_iiiiiiii"] = function() {
   return Module["asm"]["dynCall_iiiiiiii"].apply(null, arguments)
 };
 
+var dynCall_iiiiiiiii = Module["dynCall_iiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiii = Module["dynCall_iiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiii = Module["dynCall_iiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiii"].apply(null, arguments)
+};
+
 var dynCall_iiiiiiiiiiii = Module["dynCall_iiiiiiiiiiii"] = function() {
   assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
   assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
   return Module["asm"]["dynCall_iiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_iiiiij = Module["dynCall_iiiiij"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiij"].apply(null, arguments)
+};
+
+var dynCall_iiiiiji = Module["dynCall_iiiiiji"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiiiji"].apply(null, arguments)
 };
 
 var dynCall_iiiij = Module["dynCall_iiiij"] = function() {
@@ -6668,10 +9198,28 @@ var dynCall_iiiij = Module["dynCall_iiiij"] = function() {
   return Module["asm"]["dynCall_iiiij"].apply(null, arguments)
 };
 
+var dynCall_iiij = Module["dynCall_iiij"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiij"].apply(null, arguments)
+};
+
+var dynCall_iiiji = Module["dynCall_iiiji"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiiji"].apply(null, arguments)
+};
+
 var dynCall_iij = Module["dynCall_iij"] = function() {
   assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
   assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
   return Module["asm"]["dynCall_iij"].apply(null, arguments)
+};
+
+var dynCall_iiji = Module["dynCall_iiji"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_iiji"].apply(null, arguments)
 };
 
 var dynCall_iijji = Module["dynCall_iijji"] = function() {
@@ -6680,10 +9228,190 @@ var dynCall_iijji = Module["dynCall_iijji"] = function() {
   return Module["asm"]["dynCall_iijji"].apply(null, arguments)
 };
 
+var dynCall_j = Module["dynCall_j"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_j"].apply(null, arguments)
+};
+
 var dynCall_ji = Module["dynCall_ji"] = function() {
   assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
   assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
   return Module["asm"]["dynCall_ji"].apply(null, arguments)
+};
+
+var dynCall_jii = Module["dynCall_jii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jii"].apply(null, arguments)
+};
+
+var dynCall_jiii = Module["dynCall_jiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiii"].apply(null, arguments)
+};
+
+var dynCall_jiiii = Module["dynCall_jiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiii = Module["dynCall_jiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiii = Module["dynCall_jiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiii = Module["dynCall_jiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiii = Module["dynCall_jiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiii = Module["dynCall_jiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiii = Module["dynCall_jiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiii = Module["dynCall_jiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
+};
+
+var dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiiiiii = Module["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"] = function() {
+  assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
+  return Module["asm"]["dynCall_jiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"].apply(null, arguments)
 };
 
 var dynCall_jiji = Module["dynCall_jiji"] = function() {
