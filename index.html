@@ -95,7 +95,7 @@ return nil</div>
     <script src="https://fivetechsoft.github.io/xcloud/src-noconflict/ace.js" type="text/javascript" charset="utf-8"></script>
     <script>
        var editor = ace.edit("editor");
-       var code;
+       var code, editor_width, right_margin_left;
        editor.setTheme("ace/theme/tomorrow_night_blue");
        editor.setFontSize(18);     
        editor.setHighlightActiveLine(true);
@@ -104,7 +104,15 @@ return nil</div>
        code = localStorage.getItem('code');  
        if( code && code.length != 0 )
           editor.session.setValue( code );
- 
+
+       editor_width = localStorage.getItem( 'editor-width' );
+       if( editor_width )
+          $( "#editor" ).css( "width", editor_width );
+
+       right_margin_left = localStorage.getItem( 'right-margin-left' );
+       if( right_margin_left )
+          $( "#right" ).css( "margin-left", right_margin_left );
+
        function OpenFile()
        { 
           var oFile; 
@@ -126,6 +134,8 @@ return nil</div>
        function Run()
        {
           localStorage.setItem( 'code', editor.getValue() );
+          localStorage.setItem( 'editor-width', $( "#editor" ).css( "width" ) );
+          localStorage.setItem( 'right-margin-left', $( "#right" ).css( "margin-left" ) );
           window.location.reload( true );
        }
  
