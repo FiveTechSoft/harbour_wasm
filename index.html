@@ -38,29 +38,38 @@
       #menu li:last-child{
         float:right;
       }
-      #editor{
-         margin-left:0px;
-         height:920px;
-         width:60%;
-         float:left;
+      #editor {
+        margin-left: 0px;
+        width:946px;
+        float: left;
+        bottom: 0px;
+        position: absolute;
+        top: 39px;
       }
       #splitter{
-         height:920px;
          width:5px;
          background-color: white;
          cursor:col-resize;
          float:left;
+         height: 100%;
       }
       #right{
           background-color:aquamarine;
-          height:920px;
-          margin-left:1117px;
           font-family: Monaco, Menlo, "Ubuntu Mono", Consolas, source-code-pro, monospace;
+          margin-left: 947px;
+          position: absolute;
+          top: 39px;
+          bottom: 0px;
+          width: 100%;
+      }
+      #output{
+        float: left;
+        height: 100%;
+        padding: 10px;
       }
     </style>
   </head>
-  <body>
-
+  <body style="overflow:hidden;">
     <div id="menu">
       <ul>
         <li><a onclick="OpenFile()">Open</a></li>
@@ -71,7 +80,7 @@
       </ul> 
     </div>
 
-    <div style="width:100%;height:100%;">
+    <div id="row" style="width:100%;height:100%;">
       <div id="editor">function Main()
         
   ? "Hello world"
