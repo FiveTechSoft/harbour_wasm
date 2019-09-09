@@ -1,3 +1,5 @@
+[![](https://bitbucket.org/fivetech/screenshots/downloads/fivetech_logo.gif)](http://www.fivetechsoft.com "FiveTech Software")
+
 Harbour_wasm is Harbour 3.4 (Viktor's fork) built with emscripten to generate a wasm (web assembly) app:
 
 https://github.com/vszakats/harbour-core
