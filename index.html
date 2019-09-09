@@ -102,7 +102,7 @@ return nil</div>
        editor.session.setMode("ace/mode/c_cpp");
 
        code = localStorage.getItem('code');  
-       if( code.length != 0 )
+       if( code && code.length != 0 )
           editor.session.setValue( code );
  
        function OpenFile()
